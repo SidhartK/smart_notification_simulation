@@ -462,5 +462,184 @@ def _(math, random):
     return (distraction_sim,)
 
 
+@app.cell
+def _(distraction_sim, go, pl):
+    _FREQUENCIES = [2, 4, 8, 12, 20, 30, 60]
+    _ALPHAS = [i / 200 for i in range(1, 201)]
+    _N_SEEDS = 50
+
+    _rows = []
+    for _freq in _FREQUENCIES:
+        for _alpha in _ALPHAS:
+            _ttp = _tfp = _tfn = _ttn = 0
+            for _s in range(_N_SEEDS):
+                _res = distraction_sim(_freq, _alpha, seed=_s)
+                _ttp += _res["tp"]
+                _tfp += _res["fp"]
+                _tfn += _res["fn"]
+                _ttn += _res["tn"]
+            _prec = _ttp / (_ttp + _tfp) if (_ttp + _tfp) > 0 else None
+            _rec = _ttp / (_ttp + _tfn) if (_ttp + _tfn) > 0 else None
+            if _prec is not None and _rec is not None:
+                _rows.append({
+                    "freq": _freq,
+                    "alpha": round(_alpha, 4),
+                    "precision": _prec,
+                    "recall": _rec,
+                    "tp": _ttp,
+                    "fp": _tfp,
+                    "fn": _tfn,
+                })
+
+    pareto_df = pl.DataFrame(_rows)
+
+    _colors = {
+        2: "#E63946",
+        4: "#457B9D",
+        8: "#2A9D8F",
+        12: "#E9C46A",
+        20: "#F4A261",
+        30: "#264653",
+        60: "#6A0572",
+    }
+
+    _fig = go.Figure()
+    for _freq in _FREQUENCIES:
+        _sub = pareto_df.filter(pl.col("freq") == _freq).sort("recall")
+        if _sub.height == 0:
+            continue
+        _fig.add_trace(go.Scatter(
+            x=_sub["recall"].to_list(),
+            y=_sub["precision"].to_list(),
+            mode="lines+markers",
+            marker=dict(size=3),
+            name=f"{_freq}/hr",
+            line=dict(color=_colors[_freq], width=2),
+            hovertemplate=(
+                "α=%{customdata[0]:.2f}<br>"
+                "Recall=%{x:.3f}<br>"
+                "Precision=%{y:.3f}<br>"
+                "TP=%{customdata[1]}, FP=%{customdata[2]}, FN=%{customdata[3]}"
+                "<extra>%{fullData.name}</extra>"
+            ),
+            customdata=list(zip(
+                _sub["alpha"].to_list(),
+                _sub["tp"].to_list(),
+                _sub["fp"].to_list(),
+                _sub["fn"].to_list(),
+            )),
+        ))
+
+    _fig.update_layout(
+        title="Precision–Recall Pareto Frontiers by Polling Frequency<br>"
+              "<sub>Each curve sweeps distraction coefficient α from 0→1 "
+              "(averaged over 50 seeds, 8-hour day, ~45-min tasks)</sub>",
+        xaxis_title="Recall",
+        yaxis_title="Precision",
+        xaxis=dict(range=[0, 1.05]),
+        yaxis=dict(range=[0, 1.05]),
+        height=560,
+        margin=dict(l=60, r=20, t=70, b=50),
+        legend_title="Poll freq",
+        legend=dict(
+            orientation="v", yanchor="top", y=0.98, xanchor="right", x=0.98,
+            bgcolor="rgba(255,255,255,0.8)",
+        ),
+    )
+    _fig
+    return (pareto_df,)
+
+
+@app.cell
+def _(go, pareto_df, pl):
+    _df = pareto_df.with_columns(
+        (2 * pl.col("precision") * pl.col("recall")
+         / (pl.col("precision") + pl.col("recall"))
+        ).alias("f1")
+    ).with_columns(pl.col("f1").fill_nan(0.0))
+
+    _best = (
+        _df.sort("f1", descending=True)
+        .group_by("freq")
+        .first()
+        .sort("freq")
+    )
+
+    _colors = {
+        2: "#E63946", 4: "#457B9D", 8: "#2A9D8F",
+        12: "#E9C46A", 20: "#F4A261", 30: "#264653", 60: "#6A0572",
+    }
+
+    _fig = go.Figure()
+    for _row in _best.iter_rows(named=True):
+        _sub = _df.filter(pl.col("freq") == _row["freq"]).sort("alpha")
+        _fig.add_trace(go.Scatter(
+            x=_sub["alpha"].to_list(),
+            y=_sub["f1"].to_list(),
+            mode="lines",
+            name=f'{_row["freq"]}/hr',
+            line=dict(color=_colors[_row["freq"]], width=2),
+        ))
+        _fig.add_trace(go.Scatter(
+            x=[_row["alpha"]],
+            y=[_row["f1"]],
+            mode="markers",
+            marker=dict(
+                size=10, color=_colors[_row["freq"]],
+                symbol="star", line=dict(width=1, color="white"),
+            ),
+            showlegend=False,
+            hovertemplate=(
+                f'freq={_row["freq"]}/hr<br>'
+                f'best α={_row["alpha"]:.2f}<br>'
+                f'F1={_row["f1"]:.3f}<br>'
+                f'P={_row["precision"]:.3f}, R={_row["recall"]:.3f}'
+                "<extra></extra>"
+            ),
+        ))
+
+    _fig.update_layout(
+        title="F1 Score vs Distraction Coefficient α<br>"
+              "<sub>★ = optimal α for each polling frequency</sub>",
+        xaxis_title="Distraction coefficient α",
+        yaxis_title="F1 Score",
+        xaxis=dict(range=[0, 1.0]),
+        yaxis=dict(range=[0, 1.05]),
+        height=420,
+        margin=dict(l=60, r=20, t=70, b=50),
+        legend_title="Poll freq",
+    )
+    _fig
+    return
+
+
+@app.cell
+def _(mo, pareto_df, pl):
+    _df = pareto_df.with_columns(
+        (2 * pl.col("precision") * pl.col("recall")
+         / (pl.col("precision") + pl.col("recall"))
+        ).alias("f1")
+    ).with_columns(pl.col("f1").fill_nan(0.0))
+
+    _best = (
+        _df.sort("f1", descending=True)
+        .group_by("freq")
+        .first()
+        .sort("freq")
+        .select([
+            pl.col("freq").alias("Poll freq (/hr)"),
+            pl.col("alpha").alias("Best α"),
+            pl.col("precision").round(3).alias("Precision"),
+            pl.col("recall").round(3).alias("Recall"),
+            pl.col("f1").round(3).alias("F1"),
+        ])
+    )
+    mo.vstack([
+        mo.md("### Optimal distraction coefficient per polling frequency"),
+        mo.ui.table(_best),
+    ])
+    return
+
+
 if __name__ == "__main__":
     app.run()
