@@ -1,0 +1,242 @@
+<style>
+.row { display:flex; align-items:center; gap:10px; margin-bottom:8px; font-size:13px; color:var(--color-text-secondary); }
+.row label { min-width:160px; flex-shrink:0; }
+.row span { min-width:42px; text-align:right; font-weight:500; color:var(--color-text-primary); font-size:13px; }
+.row input[type=range] { flex:1; }
+.mcard { background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:10px 14px; }
+.mcard .ml { font-size:11px; color:var(--color-text-secondary); margin-bottom:3px; }
+.mcard .mv { font-size:20px; font-weight:500; color:var(--color-text-primary); }
+.mcard .ms { font-size:11px; color:var(--color-text-tertiary); margin-top:2px; }
+.sect { font-size:11px; font-weight:500; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:.06em; margin:16px 0 8px; }
+</style>
+
+<div style="display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:16px;">
+  <div class="mcard"><div class="ml">precision</div><div class="mv" id="m-prec">—</div><div class="ms">notifs in accept zone</div></div>
+  <div class="mcard"><div class="ml">recall</div><div class="mv" id="m-rec">—</div><div class="ms">lag after threshold</div></div>
+  <div class="mcard"><div class="ml">context switches</div><div class="mv" id="m-sw">—</div><div class="ms">total over 8h</div></div>
+  <div class="mcard"><div class="ml">avg desire</div><div class="mv" id="m-avg">—</div><div class="ms">lower is better</div></div>
+</div>
+
+<div class="sect">task stream (0 = focused, 1 = switched)</div>
+<div style="position:relative;width:100%;height:80px;"><canvas id="c1"></canvas></div>
+
+<div class="sect">desire to switch over time</div>
+<div style="position:relative;width:100%;height:160px;"><canvas id="c2"></canvas></div>
+
+<div class="sect">cumulative avg desire &amp; precision/recall over time</div>
+<div style="position:relative;width:100%;height:160px;"><canvas id="c3"></canvas></div>
+
+<div style="display:flex;flex-wrap:wrap;gap:16px;margin:10px 0 14px;font-size:12px;color:var(--color-text-secondary);">
+  <span style="display:flex;align-items:center;gap:4px;"><span style="width:10px;height:10px;border-radius:2px;background:#534AB7;"></span>desire</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="width:10px;height:10px;border-radius:2px;background:#1D9E75;"></span>cumul. avg desire</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="width:10px;height:10px;border-radius:2px;background:#D85A30;"></span>threshold (0.85)</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="width:10px;height:10px;border-radius:2px;background:#BA7517;"></span>accept floor</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="width:10px;height:10px;border-radius:2px;background:#378ADD;"></span>notification fired</span>
+</div>
+
+<div style="border-top:0.5px solid var(--color-border-tertiary);padding-top:14px;">
+  <div class="sect">engine parameters</div>
+  <div class="row"><label>Poll freq (per hour)</label><input type="range" min="1" max="60" step="1" value="12" id="freq" oninput="run()"><span id="v-freq">12</span></div>
+  <div class="row"><label>Difficulty</label><input type="range" min="0.3" max="3.0" step="0.1" value="1.2" id="diff" oninput="run()"><span id="v-diff">1.2</span></div>
+  <div class="row"><label>Steepness (k)</label><input type="range" min="0.02" max="0.3" step="0.01" value="0.08" id="steep" oninput="run()"><span id="v-steep">0.08</span></div>
+  <div class="row"><label>Inflection point</label><input type="range" min="0.2" max="0.9" step="0.05" value="0.55" id="infl" oninput="run()"><span id="v-infl">0.55</span></div>
+  <div class="row"><label>Task duration (min)</label><input type="range" min="20" max="90" step="5" value="45" id="tdur" oninput="run()"><span id="v-tdur">45</span></div>
+  <div class="row"><label>Accept gap (below thresh)</label><input type="range" min="0.05" max="0.5" step="0.05" value="0.25" id="gap" oninput="run()"><span id="v-gap">0.25</span></div>
+  <div style="margin-top:8px;"><button onclick="reseed()">Re-randomise seed ↗</button></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+let seed = 42;
+function rng() { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return (seed >>> 0) / 0xffffffff; }
+function reseed() { seed = Math.floor(Math.random()*1e9); run(); }
+
+function desire(t, T, k, diff, infl) {
+  const mid = infl * T;
+  const s = x => 1/(1+Math.exp(-x));
+  const raw = s(k*diff*(t-mid));
+  const lo = s(-k*diff*mid);
+  const hi = s(k*diff*(T-mid));
+  return (raw-lo)/(hi-lo);
+}
+
+let charts = {};
+
+function mkChart(id, cfg) {
+  if (charts[id]) { charts[id].destroy(); }
+  charts[id] = new Chart(document.getElementById(id), cfg);
+}
+
+function run() {
+  const freq    = +document.getElementById('freq').value;
+  const diff    = +document.getElementById('diff').value;
+  const k       = +document.getElementById('steep').value;
+  const infl    = +document.getElementById('infl').value;
+  const tdur    = +document.getElementById('tdur').value;
+  const gap     = +document.getElementById('gap').value;
+
+  document.getElementById('v-freq').textContent  = freq;
+  document.getElementById('v-diff').textContent  = diff.toFixed(1);
+  document.getElementById('v-steep').textContent = k.toFixed(2);
+  document.getElementById('v-infl').textContent  = infl.toFixed(2);
+  document.getElementById('v-tdur').textContent  = tdur;
+  document.getElementById('v-gap').textContent   = gap.toFixed(2);
+
+  const THRESHOLD = 0.85;
+  const ACCEPT_FLOOR = THRESHOLD - gap;
+  const DAY_MIN = 480;
+  const RES = 2;
+  const STEPS = DAY_MIN / RES;
+
+  const savedSeed = seed;
+
+  let strmIdx = 0;
+  let taskStart = 0;
+  let taskT = tdur + (rng()-0.5)*10;
+
+  const streamData = [];
+  const desireData = [];
+  const notifTimes = [];
+  const switchTimes = [];
+
+  let lastNotifTime = -999;
+  const pollInterval = 60 / freq;
+
+  let aboveThreshSince = null;
+  let totalRecallLag = 0;
+  let recallCount = 0;
+  let notifPreciseCount = 0;
+  let notifTotal = 0;
+  let desireSum = 0;
+  let switchCount = 0;
+  let cumulAvgDesire = [];
+
+  for (let i = 0; i <= STEPS; i++) {
+    const t = i * RES;
+    const tInTask = t - taskStart;
+    const d = desire(tInTask, taskT, k, diff, infl);
+    desireData.push(d);
+    desireSum += d;
+    cumulAvgDesire.push(desireSum / (i+1));
+
+    if (d >= THRESHOLD && aboveThreshSince === null) aboveThreshSince = t;
+
+    const isNotifTime = (t > 0) && (Math.abs(t - Math.round(t/pollInterval)*pollInterval) < RES/2);
+    if (isNotifTime && t - lastNotifTime >= pollInterval * 0.9) {
+      notifTimes.push(i);
+      lastNotifTime = t;
+      notifTotal++;
+      if (d >= ACCEPT_FLOOR) notifPreciseCount++;
+      if (d >= THRESHOLD) {
+        strmIdx++;
+        switchCount++;
+        switchTimes.push(i);
+        if (aboveThreshSince !== null) {
+          totalRecallLag += (t - aboveThreshSince);
+          recallCount++;
+        }
+        taskStart = t;
+        taskT = tdur + (rng()-0.5)*10;
+        aboveThreshSince = null;
+      }
+    }
+    streamData.push(strmIdx % 2);
+  }
+
+  const labels = Array.from({length: STEPS+1}, (_,i) => {
+    const m = i*RES;
+    return (m % 60 === 0) ? (m/60)+'h' : '';
+  });
+
+  const precision = notifTotal > 0 ? notifPreciseCount / notifTotal : 0;
+  const avgRecallLag = recallCount > 0 ? totalRecallLag / recallCount : 0;
+  const maxPossibleLag = pollInterval;
+  const recall = Math.max(0, 1 - avgRecallLag / (maxPossibleLag * 2));
+  const avgDesire = desireSum / (STEPS+1);
+
+  document.getElementById('m-prec').textContent = (precision*100).toFixed(0)+'%';
+  document.getElementById('m-rec').textContent  = (recall*100).toFixed(0)+'%';
+  document.getElementById('m-sw').textContent   = switchCount;
+  document.getElementById('m-avg').textContent  = avgDesire.toFixed(3);
+
+  const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const gridCol = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.05)';
+  const tickCol = '#888780';
+
+  const notifAnnotStream = notifTimes.map(i => ({
+    type:'line', scaleID:'x', value:i,
+    borderColor:'rgba(55,138,221,0.35)', borderWidth:1
+  }));
+
+  mkChart('c1', {
+    type:'line',
+    data: {
+      labels,
+      datasets:[{
+        data: streamData,
+        borderColor:'#534AB7', borderWidth:1.5,
+        pointRadius:0, stepped:true, fill:false,
+        tension:0
+      }]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{ legend:{display:false}, tooltip:{enabled:false} },
+      scales:{
+        x:{ ticks:{ color:tickCol, font:{size:10}, callback:(_,i)=>labels[i]||'' }, grid:{color:gridCol} },
+        y:{ min:-0.1, max:1.1, ticks:{ color:tickCol, font:{size:10}, callback:v=>v===0?'focused':v===1?'switched':'' }, grid:{color:gridCol} }
+      }
+    }
+  });
+
+  const threshLine = Array(STEPS+1).fill(THRESHOLD);
+  const acceptLine = Array(STEPS+1).fill(ACCEPT_FLOOR);
+
+  const notifScatter = notifTimes.map(i => ({x:i, y:desireData[i]}));
+
+  mkChart('c2', {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        { data:desireData, borderColor:'#534AB7', borderWidth:1.5, pointRadius:0, tension:0.3, fill:false, label:'desire' },
+        { data:threshLine, borderColor:'#D85A30', borderWidth:1, borderDash:[5,4], pointRadius:0, fill:{target:'end', above:'rgba(216,90,48,0.07)'}, label:'threshold' },
+        { data:acceptLine, borderColor:'#BA7517', borderWidth:1, borderDash:[3,3], pointRadius:0, fill:false, label:'accept floor' },
+        { type:'scatter', data:notifScatter, backgroundColor:'rgba(55,138,221,0.7)', pointRadius:3, label:'notification' }
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{ legend:{display:false} },
+      scales:{
+        x:{ ticks:{ color:tickCol, font:{size:10}, callback:(_,i)=>labels[i]||'' }, grid:{color:gridCol} },
+        y:{ min:0, max:1.05, ticks:{ color:tickCol, font:{size:10}, stepSize:0.25 }, grid:{color:gridCol} }
+      }
+    }
+  });
+
+  mkChart('c3', {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        { data:cumulAvgDesire, borderColor:'#1D9E75', borderWidth:1.5, pointRadius:0, tension:0.3, fill:false, label:'cumul avg desire' },
+        { data:threshLine, borderColor:'#D85A30', borderWidth:1, borderDash:[5,4], pointRadius:0, fill:false, label:'threshold' },
+        { data:acceptLine, borderColor:'#BA7517', borderWidth:1, borderDash:[3,3], pointRadius:0, fill:false, label:'accept floor' }
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{ legend:{display:false} },
+      scales:{
+        x:{ ticks:{ color:tickCol, font:{size:10}, callback:(_,i)=>labels[i]||'' }, grid:{color:gridCol} },
+        y:{ min:0, max:1.05, ticks:{ color:tickCol, font:{size:10}, stepSize:0.25 }, grid:{color:gridCol} }
+      }
+    }
+  });
+
+  seed = savedSeed;
+}
+
+run();
+</script>
