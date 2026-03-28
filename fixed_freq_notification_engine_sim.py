@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.21.1"
+__generated_with = "0.20.4"
 app = marimo.App(width="medium")
 
 
@@ -18,6 +18,7 @@ def _():
 @app.cell
 def _(mo):
     get_seed, set_seed = mo.state(42)
+
     return get_seed, set_seed
 
 
