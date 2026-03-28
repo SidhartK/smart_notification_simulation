@@ -366,13 +366,100 @@ def _(df, go):
 
 
 @app.cell
-def _():
+def _(mo):
+    mo.md(r"""
+    ---
+    ## Simplified Distraction-Coefficient Model
+
+    We strip away the sigmoid desire-to-switch curve and use a minimal model:
+
+    - Each task has a **natural duration** $T \sim \mathcal{N}(\mu, \sigma^2)$.
+    - A linear **desire** $d(t) = \min\!\bigl(1,\; t_{\text{elapsed}} / T\bigr)$
+      ramps from 0 at task start to 1 when the task reaches its natural end.
+    - **Ground truth**: the user *should* switch once
+      $d(t) \ge \tau$ (e.g. $\tau = 0.85$ — task is ≥ 85 % complete).
+    - Notifications arrive at a fixed **polling frequency** $f$ (per hour).
+    - The **distraction coefficient** $\alpha \in (0, 1]$ controls how
+      aggressively the notification nudges the user.  The probability of
+      switching at each poll is
+
+    $$
+      P(\text{switch}) \;=\; \sigma\!\bigl(\,\beta\,\bigl(d(t) - (1-\alpha)\bigr)\bigr)
+    $$
+
+      where $\sigma$ is the logistic sigmoid and $\beta$ controls sharpness.
+
+    | $\alpha$ low | User ignores most notifications | **High precision, low recall** |
+    |---|---|---|
+    | $\alpha$ high | User switches easily | **Low precision, high recall** |
+
+    By sweeping $\alpha$ at each polling frequency we trace **Pareto frontiers**
+    in precision–recall space.
+    """)
     return
 
 
 @app.cell
-def _():
-    return
+def _(math, random):
+    def distraction_sim(
+        poll_freq,
+        alpha,
+        task_dur_mean=45.0,
+        task_dur_std=12.0,
+        day_minutes=480,
+        true_threshold=0.85,
+        beta=12.0,
+        seed=42,
+    ):
+        """Simulate one 8-hour day with the distraction-coefficient model.
+
+        Returns dict with precision, recall, and TP/FP/FN/TN counts.
+        """
+        rng = random.Random(seed)
+        switch_point = 1.0 - alpha
+        poll_interval = 60.0 / poll_freq
+
+        task_start = 0.0
+        task_dur = max(10.0, rng.gauss(task_dur_mean, task_dur_std))
+
+        tp = fp = fn = tn = 0
+
+        t = poll_interval
+        while t <= day_minutes:
+            elapsed = t - task_start
+            d = min(1.0, elapsed / task_dur)
+
+            should_switch = d >= true_threshold
+            p_switch = 1.0 / (1.0 + math.exp(-beta * (d - switch_point)))
+            does_switch = rng.random() < p_switch
+
+            if does_switch and should_switch:
+                tp += 1
+                task_start = t
+                task_dur = max(10.0, rng.gauss(task_dur_mean, task_dur_std))
+            elif does_switch and not should_switch:
+                fp += 1
+                task_start = t
+                task_dur = max(10.0, rng.gauss(task_dur_mean, task_dur_std))
+            elif not does_switch and should_switch:
+                fn += 1
+            else:
+                tn += 1
+
+            t += poll_interval
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 1.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        return {
+            "precision": precision,
+            "recall": recall,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "tn": tn,
+        }
+
+    return (distraction_sim,)
 
 
 if __name__ == "__main__":
