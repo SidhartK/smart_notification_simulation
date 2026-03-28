@@ -11,8 +11,9 @@ def _():
     import plotly.graph_objects as go
     import math
     import random
+    import json
 
-    return go, math, mo, pl, random
+    return go, json, math, mo, pl, random
 
 
 @app.cell
@@ -395,12 +396,272 @@ def _(mo):
 
     By sweeping $\alpha$ at each polling frequency we trace **Pareto frontiers**
     in precision–recall space.
+
+    The **desire curve** $d(t)$ is parametrised as a cubic B-spline through
+    editable control points — drag the knots below to reshape it.
     """)
     return
 
 
 @app.cell
-def _(math, random):
+def _():
+    import anywidget
+    import traitlets
+
+    class SplineEditor(anywidget.AnyWidget):
+        _esm = r"""
+function render({ model, el }) {
+    const W = 540, H = 380;
+    const pad = { top: 20, right: 20, bottom: 48, left: 52 };
+    const pW = W - pad.left - pad.right, pH = H - pad.top - pad.bottom;
+    const R = 8, ns = "http://www.w3.org/2000/svg";
+
+    const wrap = document.createElement("div");
+    wrap.style.fontFamily = "system-ui, sans-serif";
+    wrap.style.display = "inline-block";
+
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("width", W);
+    svg.setAttribute("height", H);
+    Object.assign(svg.style, {
+        background: "#fafafa", border: "1px solid #ddd",
+        borderRadius: "6px", cursor: "crosshair", userSelect: "none"
+    });
+    wrap.appendChild(svg);
+
+    const btnRow = document.createElement("div");
+    btnRow.style.cssText = "margin-top:6px;display:flex;gap:8px;align-items:center;";
+    function mkBtn(label, fn) {
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.style.cssText = "padding:4px 10px;border:1px solid #bbb;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;";
+        b.onclick = fn;
+        return b;
+    }
+    btnRow.appendChild(mkBtn("Reset to linear", () => sync([[0,0],[0.25,0.25],[0.5,0.5],[0.75,0.75],[1,1]])));
+    btnRow.appendChild(mkBtn("Concave (early)", () => sync([[0,0],[0.15,0.45],[0.35,0.75],[0.6,0.92],[1,1]])));
+    btnRow.appendChild(mkBtn("Convex (late)", () => sync([[0,0],[0.4,0.08],[0.65,0.25],[0.85,0.55],[1,1]])));
+    wrap.appendChild(btnRow);
+
+    const hint = document.createElement("div");
+    hint.style.cssText = "font-size:11px;color:#999;margin-top:3px;";
+    hint.textContent = "Click to add point \u00b7 drag to move \u00b7 double-click to remove";
+    wrap.appendChild(hint);
+    el.appendChild(wrap);
+
+    const toX = x => pad.left + x * pW;
+    const toY = y => pad.top + (1 - y) * pH;
+    const fromX = sx => Math.max(0, Math.min(1, (sx - pad.left) / pW));
+    const fromY = sy => Math.max(0, Math.min(1, 1 - (sy - pad.top) / pH));
+
+    function svgEl(tag, a) {
+        const e = document.createElementNS(ns, tag);
+        for (const [k, v] of Object.entries(a || {})) e.setAttribute(k, String(v));
+        return e;
+    }
+    function svgTxt(x, y, t, a) {
+        const e = svgEl("text", { x, y, "font-size":"11px", fill:"#888", ...a });
+        e.textContent = t; return e;
+    }
+
+    // static grid
+    const sG = svgEl("g"); svg.appendChild(sG);
+    sG.appendChild(svgEl("rect", { x:pad.left, y:pad.top, width:pW, height:pH, fill:"#fff", stroke:"#e0e0e0" }));
+    for (let v = 0; v <= 1; v += 0.25) {
+        sG.appendChild(svgEl("line", { x1:toX(v), y1:pad.top, x2:toX(v), y2:pad.top+pH, stroke:"#f0f0f0" }));
+        sG.appendChild(svgEl("line", { x1:pad.left, y1:toY(v), x2:pad.left+pW, y2:toY(v), stroke:"#f0f0f0" }));
+        sG.appendChild(svgTxt(toX(v), pad.top+pH+18, v.toFixed(2), { "text-anchor":"middle" }));
+        sG.appendChild(svgTxt(pad.left-8, toY(v)+4, v.toFixed(2), { "text-anchor":"end" }));
+    }
+    sG.appendChild(svgTxt(pad.left+pW/2, H-5, "Task progress (t/T)", { "text-anchor":"middle", fill:"#666", "font-size":"12px" }));
+    const yL = svgTxt(14, pad.top+pH/2, "Desire d(t)", { "text-anchor":"middle", fill:"#666", "font-size":"12px" });
+    yL.setAttribute("transform", "rotate(-90,14,"+(pad.top+pH/2)+")"); sG.appendChild(yL);
+    sG.appendChild(svgEl("line", { x1:toX(0), y1:toY(0), x2:toX(1), y2:toY(1), stroke:"#ddd", "stroke-dasharray":"6,4" }));
+
+    // cubic spline math
+    function cSpline(pts) {
+        const xs = pts.map(p=>p[0]), ys = pts.map(p=>p[1]), n = xs.length-1;
+        if (n < 1) return null;
+        if (n === 1) return { t:"L", xs, ys };
+        const h = []; for (let i=0;i<n;i++) h[i]=xs[i+1]-xs[i];
+        const al = Array(n+1).fill(0);
+        for (let i=1;i<n;i++) { if(!h[i]||!h[i-1]) continue; al[i]=3/h[i]*(ys[i+1]-ys[i])-3/h[i-1]*(ys[i]-ys[i-1]); }
+        const l=Array(n+1).fill(0), mu=Array(n+1).fill(0), z=Array(n+1).fill(0); l[0]=1;
+        for (let i=1;i<n;i++) { l[i]=2*(xs[i+1]-xs[i-1])-h[i-1]*mu[i-1]; if(Math.abs(l[i])<1e-12) l[i]=1e-12; mu[i]=h[i]/l[i]; z[i]=(al[i]-h[i-1]*z[i-1])/l[i]; }
+        l[n]=1; const c=Array(n+1).fill(0), b=Array(n).fill(0), d=Array(n).fill(0);
+        for (let j=n-1;j>=0;j--) { c[j]=z[j]-mu[j]*c[j+1]; b[j]=(ys[j+1]-ys[j])/h[j]-h[j]*(c[j+1]+2*c[j])/3; d[j]=(c[j+1]-c[j])/(3*h[j]); }
+        return { t:"C", a:ys.slice(0,n), b, c:c.slice(0,n), d, xs };
+    }
+    function evalS(sp, t) {
+        if (!sp) return t;
+        t = Math.max(sp.xs[0], Math.min(sp.xs[sp.xs.length-1], t));
+        if (sp.t==="L") { const r=sp.xs[1]===sp.xs[0]?0:(t-sp.xs[0])/(sp.xs[1]-sp.xs[0]); return sp.ys[0]+r*(sp.ys[1]-sp.ys[0]); }
+        let i=0; for(;i<sp.a.length-1;i++) if(t<=sp.xs[i+1]) break;
+        const dt=t-sp.xs[i]; return sp.a[i]+sp.b[i]*dt+sp.c[i]*dt*dt+sp.d[i]*dt*dt*dt;
+    }
+
+    // dynamic layer
+    const dG = svgEl("g"); svg.appendChild(dG);
+    let localPts = JSON.parse(model.get("value"));
+
+    function redraw(pts) {
+        while (dG.firstChild) dG.removeChild(dG.firstChild);
+        const sorted = [...pts].sort((a,b) => a[0]-b[0]);
+        const sp = cSpline(sorted);
+        let pathD = "";
+        for (let i=0; i<=200; i++) {
+            const t=i/200, y=Math.max(0,Math.min(1,evalS(sp,t)));
+            pathD += (i===0?"M":"L")+toX(t).toFixed(1)+","+toY(y).toFixed(1);
+        }
+        dG.appendChild(svgEl("path", { d:pathD, fill:"none", stroke:"#534AB7", "stroke-width":2.5 }));
+        sorted.forEach((p, i) => {
+            const end = i===0 || i===sorted.length-1;
+            dG.appendChild(svgEl("circle", {
+                cx:toX(p[0]), cy:toY(p[1]), r:R,
+                fill: end?"#D85A30":"#534AB7",
+                stroke:"#fff", "stroke-width":2, cursor: end?"default":"grab"
+            }));
+        });
+    }
+
+    let timer = null;
+    function sync(pts) {
+        localPts = [...pts].sort((a,b) => a[0]-b[0]);
+        redraw(localPts);
+        clearTimeout(timer);
+        timer = setTimeout(() => { model.set("value", JSON.stringify(localPts)); model.save_changes(); }, 200);
+    }
+
+    let dragIdx = -1;
+    function mpos(e) { const r=svg.getBoundingClientRect(); return [e.clientX-r.left, e.clientY-r.top]; }
+    function hit(mx, my, pts) {
+        for (let i=0; i<pts.length; i++) { const dx=toX(pts[i][0])-mx, dy=toY(pts[i][1])-my; if(dx*dx+dy*dy<(R+4)**2) return i; }
+        return -1;
+    }
+
+    svg.addEventListener("mousedown", e => {
+        const [mx,my] = mpos(e), pts=[...localPts], h=hit(mx,my,pts);
+        if (h >= 0) { if (h===0||h===pts.length-1) return; dragIdx=h; svg.style.cursor="grabbing"; e.preventDefault(); return; }
+        const nx=fromX(mx), ny=fromY(my);
+        if (nx>0.01 && nx<0.99) { pts.push([+nx.toFixed(4),+ny.toFixed(4)]); sync(pts); }
+    });
+    svg.addEventListener("mousemove", e => {
+        if (dragIdx<0) return; e.preventDefault();
+        const [mx,my]=mpos(e), pts=[...localPts];
+        let nx=fromX(mx), ny=fromY(my);
+        const lo=dragIdx>0?pts[dragIdx-1][0]+0.005:0, hi=dragIdx<pts.length-1?pts[dragIdx+1][0]-0.005:1;
+        nx=Math.max(lo,Math.min(hi,nx)); ny=Math.max(0,Math.min(1,ny));
+        pts[dragIdx]=[+nx.toFixed(4),+ny.toFixed(4)]; sync(pts);
+    });
+    window.addEventListener("mouseup", () => { if(dragIdx>=0){dragIdx=-1;svg.style.cursor="crosshair";} });
+    svg.addEventListener("dblclick", e => {
+        const [mx,my]=mpos(e), pts=[...localPts], h=hit(mx,my,pts);
+        if (h>0 && h<pts.length-1) { pts.splice(h,1); sync(pts); }
+    });
+
+    redraw(localPts);
+    model.on("change:value", () => { localPts=JSON.parse(model.get("value")); redraw(localPts); });
+}
+export default { render };
+"""
+        value = traitlets.Unicode(
+            '[[0,0],[0.25,0.25],[0.5,0.5],[0.75,0.75],[1,1]]'
+        ).tag(sync=True)
+
+    return (SplineEditor,)
+
+
+@app.cell
+def _(SplineEditor, mo):
+    spline_editor = mo.ui.anywidget(SplineEditor())
+    mo.vstack([
+        mo.md("### Desire Curve Editor"),
+        spline_editor,
+    ])
+    return (spline_editor,)
+
+
+@app.cell
+def _(json):
+    def make_desire_curve(control_points_json):
+        """Build a clamped cubic-spline desire function from control-point JSON."""
+        pts = (
+            json.loads(control_points_json)
+            if isinstance(control_points_json, str)
+            else list(control_points_json)
+        )
+        pts.sort(key=lambda p: p[0])
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        n = len(xs) - 1
+
+        if n < 1:
+            return lambda t: t
+
+        if n == 1:
+            def _linear(t):
+                t = max(0.0, min(1.0, t))
+                span = xs[1] - xs[0]
+                if span == 0:
+                    return ys[0]
+                return ys[0] + (t - xs[0]) / span * (ys[1] - ys[0])
+            return _linear
+
+        h = [xs[i + 1] - xs[i] for i in range(n)]
+        alpha = [0.0] * (n + 1)
+        for i in range(1, n):
+            if h[i] == 0 or h[i - 1] == 0:
+                continue
+            alpha[i] = (
+                3 / h[i] * (ys[i + 1] - ys[i])
+                - 3 / h[i - 1] * (ys[i] - ys[i - 1])
+            )
+        l = [0.0] * (n + 1)
+        mu = [0.0] * (n + 1)
+        z = [0.0] * (n + 1)
+        l[0] = 1.0
+        for i in range(1, n):
+            l[i] = 2 * (xs[i + 1] - xs[i - 1]) - h[i - 1] * mu[i - 1]
+            if abs(l[i]) < 1e-12:
+                l[i] = 1e-12
+            mu[i] = h[i] / l[i]
+            z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i]
+        l[n] = 1.0
+        c = [0.0] * (n + 1)
+        b = [0.0] * n
+        d = [0.0] * n
+        for j in range(n - 1, -1, -1):
+            c[j] = z[j] - mu[j] * c[j + 1]
+            b[j] = (ys[j + 1] - ys[j]) / h[j] - h[j] * (c[j + 1] + 2 * c[j]) / 3
+            d[j] = (c[j + 1] - c[j]) / (3 * h[j])
+        a_c = ys[:n]
+
+        def _spline(t):
+            t = max(xs[0], min(xs[-1], t))
+            idx = 0
+            for i in range(n):
+                if t <= xs[i + 1]:
+                    idx = i
+                    break
+            else:
+                idx = n - 1
+            dt = t - xs[idx]
+            val = a_c[idx] + b[idx] * dt + c[idx] * dt**2 + d[idx] * dt**3
+            return max(0.0, min(1.0, val))
+
+        return _spline
+
+    return (make_desire_curve,)
+
+
+@app.cell
+def _(make_desire_curve, spline_editor):
+    desire_curve = make_desire_curve(spline_editor.value)
+    return (desire_curve,)
+
+
+@app.cell
+def _(desire_curve, math, random):
     def distraction_sim(
         poll_freq,
         alpha,
@@ -427,7 +688,8 @@ def _(math, random):
         t = poll_interval
         while t <= day_minutes:
             elapsed = t - task_start
-            d = min(1.0, elapsed / task_dur)
+            progress = min(1.0, elapsed / task_dur)
+            d = desire_curve(progress)
 
             should_switch = d >= true_threshold
             p_switch = 1.0 / (1.0 + math.exp(-beta * (d - switch_point)))
