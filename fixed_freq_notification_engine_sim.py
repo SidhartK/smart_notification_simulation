@@ -641,5 +641,82 @@ def _(mo, pareto_df, pl):
     return
 
 
+@app.cell
+def _(go, pareto_df, pl):
+    _N_SEEDS = 50
+    _DAY_MIN = 480
+
+    _df = pareto_df.with_columns([
+        ((pl.col("tp") + pl.col("fp")) / _N_SEEDS / (_DAY_MIN / 60)).alias("switches_per_hr"),
+        (pl.col("fn") / (pl.col("tp") + pl.col("fn"))).alias("miss_rate"),
+    ])
+
+    _colors = {
+        2: "#E63946", 4: "#457B9D", 8: "#2A9D8F",
+        12: "#E9C46A", 20: "#F4A261", 30: "#264653", 60: "#6A0572",
+    }
+
+    _fig = go.Figure()
+    for _freq in _df["freq"].unique().sort().to_list():
+        _sub = _df.filter(pl.col("freq") == _freq).sort("alpha")
+        _fig.add_trace(go.Scatter(
+            x=_sub["miss_rate"].to_list(),
+            y=_sub["switches_per_hr"].to_list(),
+            mode="lines+markers",
+            marker=dict(size=3),
+            name=f"{_freq}/hr",
+            line=dict(color=_colors[_freq], width=2),
+            hovertemplate=(
+                "α=%{customdata:.2f}<br>"
+                "Miss rate=%{x:.2%}<br>"
+                "Switches/hr=%{y:.1f}"
+                "<extra>%{fullData.name}</extra>"
+            ),
+            customdata=_sub["alpha"].to_list(),
+        ))
+
+    _fig.update_layout(
+        title="Practical View: Switches per Hour vs Miss Rate<br>"
+              "<sub>Lower-left is better — few interruptions, few missed transitions</sub>",
+        xaxis_title="Miss Rate (fraction of should-switch moments missed)",
+        yaxis_title="Total Switches per Hour (TP + FP, avg over 50 seeds)",
+        xaxis=dict(range=[-0.02, 1.02], tickformat=".0%"),
+        height=480,
+        margin=dict(l=60, r=20, t=70, b=60),
+        legend_title="Poll freq",
+    )
+    _fig
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### Key Takeaways
+
+    1. **Lower polling frequencies dominate.** The 2/hr and 4/hr curves sit
+       furthest toward the top-right of the PR plot — they achieve the best
+       precision at any given recall level.  This is because fewer polls
+       per task mean each notification lands later in the task lifecycle,
+       where desire is naturally higher.
+
+    2. **The optimal α decreases as frequency increases.** High-frequency
+       polling floods the user with opportunities to switch; you need a
+       *less* aggressive notification to avoid drowning signal in noise.
+       At 2/hr the optimal α ≈ 0.16, while at 60/hr it drops to ≈ 0.04.
+
+    3. **Diminishing returns on frequency.** Going from 2 → 4/hr barely
+       hurts the frontier, but jumping to 30 or 60/hr collapses it — the
+       best achievable F1 falls from ~0.87 to ~0.37.
+
+    4. **The "practical view" confirms it.** Plotting switches/hr vs miss
+       rate shows that high-frequency polling pushes you into a region of
+       many interruptions *and* a still-significant miss rate, whereas
+       low-frequency polling can keep interruptions under 2/hr with
+       miss rates below 20 %.
+    """)
+    return
+
+
 if __name__ == "__main__":
     app.run()
